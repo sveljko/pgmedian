@@ -155,9 +155,9 @@ PG_FUNCTION_INFO_V1(median_transfn);
  * the median for. On first call, the aggregate state, if any, needs to be
  * initialized.
  *
- * For a moving-aggregate ("window"), this would probably state the
+ * For a moving-aggregate ("window"), this would probably stay the
  * same, but we would add an "inverse", which removes the given
- * element from the array.
+ * element from the (sorted) array, utilizing a binary search to find it.
  */
 Datum
 median_transfn(PG_FUNCTION_ARGS)
