@@ -1,3 +1,4 @@
+/* -*- c-file-style:"bsd"; tab-width:4; indent-tabs-mode: t -*- */
 #include <postgres.h>
 #include <fmgr.h>
 #include <catalog/pg_type.h>
@@ -16,11 +17,12 @@ PG_MODULE_MAGIC;
     not "researched" (though might probably require very little code
     changes to support), but many other types also.
 */
-enum ValueClass {
-  /** Which can be handled like integers */
-  vcNumeral,
-  /** Which can be handled like "Pascal" strings */
-  vcText
+enum ValueClass
+{
+	/** Which can be handled like integers */
+	vcNumeral,
+	/** Which can be handled like "Pascal" strings */
+	vcText
 };
 
 /** This is a straight-forward implementation that scales poorly as
@@ -33,117 +35,139 @@ enum ValueClass {
     slow down iteration a little, but would speed up insertion _much_,
     making it possible to handle large amounts of data.
 */
-struct MedianState {
-  int8 varlen_hdr_[VARHDRSZ];
-  size_t cap;
-  size_t dim;
-  enum ValueClass valclass;
-  union {
-    int64 i[1];
-    text* t[1];
-  } data;
+struct MedianState
+{
+	int8		varlen_hdr_[VARHDRSZ];
+	size_t		cap;
+	size_t		dim;
+	enum ValueClass valclass;
+	union
+	{
+		int64		i[1];
+		text	   *t[1];
+	}			data;
 };
 
 
-static struct MedianState* expand_if_need_be(struct MedianState* pms)
+static struct MedianState *
+expand_if_need_be(struct MedianState *pms)
 {
-  if (pms->dim >= pms->cap) {
-    size_t ncap = (pms->cap * 3) / 2;
-    size_t to_alloc;
-    struct MedianState* npms;
-    if (ncap < pms->cap) {
-      elog(ERROR, "Overflow while expanding array for median");
-      return pms;
-    }
-    //elog(WARNING, "pms->cap = %lu, ncap = %lu", pms->cap, ncap);
-    to_alloc = sizeof *pms + sizeof pms->data * ncap;
-    //elog(WARNING, "toalloc = %lu", to_alloc);
-    npms = repalloc(pms, to_alloc);
-    if (NULL == npms) {
-      elog(ERROR, "No memory while expanding array for median");
-      return pms;
-    }
-    pms = npms;
-    SET_VARSIZE(pms, to_alloc);
-    pms->cap = ncap;
-  }
-  return pms;
+	if (pms->dim >= pms->cap)
+	{
+		size_t		ncap = (pms->cap * 3) / 2;
+		size_t		to_alloc;
+		struct MedianState *npms;
+
+		if (ncap < pms->cap)
+		{
+			elog(ERROR, "Overflow while expanding array for median");
+			return pms;
+		}
+		/* elog(WARNING, "pms->cap = %lu, ncap = %lu", pms->cap, ncap); */
+		to_alloc = sizeof *pms + sizeof pms->data * ncap;
+		/* elog(WARNING, "toalloc = %lu", to_alloc); */
+		npms = repalloc(pms, to_alloc);
+		if (NULL == npms)
+		{
+			elog(ERROR, "No memory while expanding array for median");
+			return pms;
+		}
+		pms = npms;
+		SET_VARSIZE(pms, to_alloc);
+		pms->cap = ncap;
+	}
+	return pms;
 }
 
-static struct MedianState* insert_median_numeral(struct MedianState* pms, int64 x)
+static struct MedianState *
+insert_median_numeral(struct MedianState *pms, int64 x)
 {
-  size_t i;
-  for (i = 0; i < pms->dim; ++i) {
-    if (x >= pms->data.i[i]) {
-      memmove(pms->data.i + i + 1, pms->data.i + i, (pms->dim - i) * sizeof pms->data);
-      break;
-    }
-  }
-  pms->data.i[i] = x;
-  ++pms->dim;
-  return pms;
+	size_t		i;
+
+	for (i = 0; i < pms->dim; ++i)
+	{
+		if (x >= pms->data.i[i])
+		{
+			memmove(pms->data.i + i + 1, pms->data.i + i, (pms->dim - i) * sizeof pms->data);
+			break;
+		}
+	}
+	pms->data.i[i] = x;
+	++pms->dim;
+	return pms;
 }
 
 static int
 text_cmp(text *arg1, text *arg2, Oid collid)
 {
-  char       *a1p,
-    *a2p;
-  int         len1,
-    len2;
-  
-  a1p = VARDATA_ANY(arg1);
-  a2p = VARDATA_ANY(arg2);
-  
-  len1 = VARSIZE_ANY_EXHDR(arg1);
-  len2 = VARSIZE_ANY_EXHDR(arg2);
-  
-  return varstr_cmp(a1p, len1, a2p, len2, collid);
+	char	   *a1p;
+	char	   *a2p;
+	int			len1,
+				len2;
+
+	a1p = VARDATA_ANY(arg1);
+	a2p = VARDATA_ANY(arg2);
+
+	len1 = VARSIZE_ANY_EXHDR(arg1);
+	len2 = VARSIZE_ANY_EXHDR(arg2);
+
+	return varstr_cmp(a1p, len1, a2p, len2, collid);
 }
 
-static struct MedianState* insert_median_text(struct MedianState* pms, text* x, Oid collation)
+static struct MedianState *
+insert_median_text(struct MedianState *pms, text *x, Oid collation)
 {
-  size_t i;
-  for (i = 0; i < pms->dim; ++i) {
-    if (text_cmp(x, pms->data.t[i], collation) < 0) {
-      memmove(pms->data.t + i + 1, pms->data.t + i, (pms->dim - i) * sizeof pms->data);
-      break;
-    }
-  }
-  pms->data.t[i] = x;
-  ++pms->dim;
-  return pms;
+	size_t		i;
+
+	for (i = 0; i < pms->dim; ++i)
+	{
+		if (text_cmp(x, pms->data.t[i], collation) < 0)
+		{
+			memmove(pms->data.t + i + 1, pms->data.t + i, (pms->dim - i) * sizeof pms->data);
+			break;
+		}
+	}
+	pms->data.t[i] = x;
+	++pms->dim;
+	return pms;
 }
 
 
-static struct MedianState* create_MedianState(MemoryContext ctx)
+static struct MedianState *
+create_MedianState(MemoryContext ctx)
 {
-  struct MedianState* pms;
-  size_t const ncap = 64;
-  size_t const to_alloc = sizeof *pms + sizeof pms->data * ncap;
-  
-  //elog(WARNING, "create_MedianState() NULL == pms, to_alloc = %lu", to_alloc);
-  pms = MemoryContextAllocZero(ctx, to_alloc);
-  if (NULL == pms) {
-    elog(ERROR, "create_MedianState() no memory");
-    return NULL;
-  }
-  SET_VARSIZE(pms, to_alloc);
-  pms->dim = 0;
-  pms->cap = ncap;
+	struct MedianState *pms;
+	size_t const ncap = 64;
+	size_t const to_alloc = sizeof *pms + sizeof pms->data * ncap;
 
-  return pms;
+	/*
+	 * elog(WARNING, "create_MedianState() NULL == pms, to_alloc = %lu",
+	 * to_alloc);
+	 */
+	pms = MemoryContextAllocZero(ctx, to_alloc);
+	if (NULL == pms)
+	{
+		elog(ERROR, "create_MedianState() no memory");
+		return NULL;
+	}
+	SET_VARSIZE(pms, to_alloc);
+	pms->dim = 0;
+	pms->cap = ncap;
+
+	return pms;
 }
 
-static struct MedianState* do_median_numeral(struct MedianState* pms, int64 x)
+static struct MedianState *
+do_median_numeral(struct MedianState *pms, int64 x)
 {
-  return insert_median_numeral(expand_if_need_be(pms), x);
+	return insert_median_numeral(expand_if_need_be(pms), x);
 }
- 
- 
-static struct MedianState* do_median_text(struct MedianState* pms, text* x, Oid collation)
+
+
+static struct MedianState *
+do_median_text(struct MedianState *pms, text *x, Oid collation)
 {
-  return insert_median_text(expand_if_need_be(pms), x, collation);
+	return insert_median_text(expand_if_need_be(pms), x, collation);
 }
 
 PG_FUNCTION_INFO_V1(median_transfn);
@@ -162,52 +186,66 @@ PG_FUNCTION_INFO_V1(median_transfn);
 Datum
 median_transfn(PG_FUNCTION_ARGS)
 {
-  struct MedianState* state;
-  //Oid et, et_2;
-  MemoryContext agg_context;
-  
-  if (!AggCheckCallContext(fcinfo, &agg_context)) {
-    elog(ERROR, "median_transfn called in non-aggregate context");
-    PG_RETURN_NULL();
-  }
-  if (PG_ARGISNULL(0)) {
-    state = NULL; /* first element */
-  } else {
-    state = (struct MedianState*) PG_GETARG_BYTEA_P(0);
-  }
-  if (PG_ARGISNULL(1)) {
-    /* discard NULL input values */
-  } else {
-    Oid partyp;
-    if (NULL == state) {
-      state = create_MedianState(agg_context);
-    }
-    partyp = get_fn_expr_argtype(fcinfo->flinfo, 1);
-    switch (partyp) {
-    case INT2OID:
-      state = do_median_numeral(state, PG_GETARG_INT16(1));
-      break;
-    case INT4OID:
-      state = do_median_numeral(state, PG_GETARG_INT32(1));
-      break;
-    case INT8OID:
-    case TIMESTAMPOID:
-    case TIMESTAMPTZOID:
-      state = do_median_numeral(state, PG_GETARG_INT64(1));
-      break;
-    case TEXTOID:
-      state = do_median_text(state, PG_GETARG_TEXT_P_COPY(1), PG_GET_COLLATION());
-      break;
-    default:
-      elog(ERROR, "parameter type oid=%u not supported", partyp);
-    }
-  }
+	struct MedianState *state;
 
-  if (state == NULL) {
-    PG_RETURN_NULL();
-  } else {
-    PG_RETURN_BYTEA_P(state);
-  }
+	/* Oid et, et_2; */
+	MemoryContext agg_context;
+
+	if (!AggCheckCallContext(fcinfo, &agg_context))
+	{
+		elog(ERROR, "median_transfn called in non-aggregate context");
+		PG_RETURN_NULL();
+	}
+	if (PG_ARGISNULL(0))
+	{
+		state = NULL;			/* first element */
+	}
+	else
+	{
+		state = (struct MedianState *) PG_GETARG_BYTEA_P(0);
+	}
+	if (PG_ARGISNULL(1))
+	{
+		/* discard NULL input values */
+	}
+	else
+	{
+		Oid			partyp;
+
+		if (NULL == state)
+		{
+			state = create_MedianState(agg_context);
+		}
+		partyp = get_fn_expr_argtype(fcinfo->flinfo, 1);
+		switch (partyp)
+		{
+			case INT2OID:
+				state = do_median_numeral(state, PG_GETARG_INT16(1));
+				break;
+			case INT4OID:
+				state = do_median_numeral(state, PG_GETARG_INT32(1));
+				break;
+			case INT8OID:
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+				state = do_median_numeral(state, PG_GETARG_INT64(1));
+				break;
+			case TEXTOID:
+				state = do_median_text(state, PG_GETARG_TEXT_P_COPY(1), PG_GET_COLLATION());
+				break;
+			default:
+				elog(ERROR, "parameter type oid=%u not supported", partyp);
+		}
+	}
+
+	if (state == NULL)
+	{
+		PG_RETURN_NULL();
+	}
+	else
+	{
+		PG_RETURN_BYTEA_P(state);
+	}
 }
 
 PG_FUNCTION_INFO_V1(median_finalfn);
@@ -230,37 +268,46 @@ PG_FUNCTION_INFO_V1(median_finalfn);
 Datum
 median_finalfn(PG_FUNCTION_ARGS)
 {
-  struct MedianState* state;
-  MemoryContext agg_context;
+	struct MedianState *state;
+	MemoryContext agg_context;
 
-  if (!AggCheckCallContext(fcinfo, &agg_context)) {
-    elog(ERROR, "median_finalfn called in non-aggregate context");
-    PG_RETURN_NULL();
-  }
-  
-  if (PG_ARGISNULL(0)) {
-    state = NULL; /* had no elements! */
-  } else {
-    state = (struct MedianState*) PG_GETARG_BYTEA_P(0);
-  }
-  if (NULL == state) {
-    PG_RETURN_NULL();
-  }
-  else {
-    if (state->dim > 0) {
-      switch (state->valclass) {
-      case vcNumeral:
+	if (!AggCheckCallContext(fcinfo, &agg_context))
 	{
-	  int64 rslt = state->data.i[state->dim/2 + 1];
-	  PG_RETURN_DATUM(Int64GetDatum(rslt));
+		elog(ERROR, "median_finalfn called in non-aggregate context");
+		PG_RETURN_NULL();
 	}
-      case vcText:
-	PG_RETURN_TEXT_P(state->data.t[state->dim/2 + 1]);
-      }
-    }
-    
-    PG_RETURN_NULL();
-  }
+
+	if (PG_ARGISNULL(0))
+	{
+		state = NULL;			/* had no elements! */
+	}
+	else
+	{
+		state = (struct MedianState *) PG_GETARG_BYTEA_P(0);
+	}
+	if (NULL == state)
+	{
+		PG_RETURN_NULL();
+	}
+	else
+	{
+		if (state->dim > 0)
+		{
+			switch (state->valclass)
+			{
+				case vcNumeral:
+					{
+						int64		rslt = state->data.i[state->dim / 2 + 1];
+
+						PG_RETURN_DATUM(Int64GetDatum(rslt));
+					}
+				case vcText:
+					PG_RETURN_TEXT_P(state->data.t[state->dim / 2 + 1]);
+			}
+		}
+
+		PG_RETURN_NULL();
+	}
 }
 
 /* For parallel aggregates, one would need to write a few more
