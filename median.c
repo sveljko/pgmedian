@@ -88,7 +88,7 @@ insert_median_numeral(struct MedianState *pms, int64 x)
 	{
 		if (x >= pms->data.i[i])
 		{
-			memmove(pms->data.i + i + 1, pms->data.i + i, (pms->dim - i) * sizeof pms->data);
+			memmove(pms->data.i + i + 1, pms->data.i + i, (pms->dim - i) * sizeof pms->data.i[0]);
 			break;
 		}
 	}
@@ -123,7 +123,7 @@ insert_median_text(struct MedianState *pms, text *x, Oid collation)
 	{
 		if (text_cmp(x, pms->data.t[i], collation) < 0)
 		{
-			memmove(pms->data.t + i + 1, pms->data.t + i, (pms->dim - i) * sizeof pms->data);
+			memmove(pms->data.t + i + 1, pms->data.t + i, (pms->dim - i) * sizeof pms->data.t[0]);
 			break;
 		}
 	}
@@ -179,16 +179,15 @@ PG_FUNCTION_INFO_V1(median_transfn);
  * the median for. On first call, the aggregate state, if any, needs to be
  * initialized.
  *
- * For a moving-aggregate ("window"), this would probably stay the
- * same, but we would add an "inverse", which removes the given
- * element from the (sorted) array, utilizing a binary search to find it.
+ * It's also used for a moving-aggregate ("window"), though there might
+ * possibly be scenarios where it should be different. Right now, we're not
+ * 100% sure, as PostgreSQL docs are not very precise on this matter.
  */
 Datum
 median_transfn(PG_FUNCTION_ARGS)
 {
 	struct MedianState *state;
 
-	/* Oid et, et_2; */
 	MemoryContext agg_context;
 
 	if (!AggCheckCallContext(fcinfo, &agg_context))
@@ -248,14 +247,136 @@ median_transfn(PG_FUNCTION_ARGS)
 	}
 }
 
+
+static struct MedianState *
+remove_median_numeral(struct MedianState *pms, int64 x)
+{
+	size_t		i;
+
+	/* Should do binary search here */
+	for (i = 0; i < pms->dim; ++i)
+	{
+		if (x == pms->data.i[i])
+		{
+			memmove(pms->data.i + i, pms->data.i + i + 1, sizeof pms->data.i[0]);
+			return pms;
+		}
+	}
+	elog(ERROR, "remove_median_numeral(%ld) not found", x);
+	return pms;
+}
+
+static struct MedianState *
+remove_median_text(struct MedianState *pms, text *x, Oid collation)
+{
+	size_t		i;
+
+	/* Should do binary search here */
+	for (i = 0; i < pms->dim; ++i)
+	{
+		if (0 == text_cmp(x, pms->data.t[i], collation))
+		{
+			memmove(pms->data.t + i, pms->data.t + i + 1, sizeof pms->data.t[0]);
+			return pms;
+		}
+	}
+	elog(ERROR, "remove_median_text() not found");
+	return pms;
+}
+
+static struct MedianState *
+undo_median_numeral(struct MedianState *pms, int64 x)
+{
+	elog(WARNING, "undo_median_numeral(%ld)", x);
+	return remove_median_numeral(expand_if_need_be(pms), x);
+}
+
+
+static struct MedianState *
+undo_median_text(struct MedianState *pms, text *x, Oid collation)
+{
+	return remove_median_text(expand_if_need_be(pms), x, collation);
+}
+
+PG_FUNCTION_INFO_V1(median_inv_transfn);
+
+/*
+ * Median inverse state transfer function.
+ *
+ * This function is called for "moving average" (window) aggregate and is
+ * designed to "remove a value from aggregate calculation".
+ *
+ */
+Datum
+median_inv_transfn(PG_FUNCTION_ARGS)
+{
+	struct MedianState *state;
+
+	MemoryContext agg_context;
+
+	if (!AggCheckCallContext(fcinfo, &agg_context))
+	{
+		elog(ERROR, "median_transfn called in non-aggregate context");
+		PG_RETURN_NULL();
+	}
+	Assert(PG_ARGISNULL(0));
+	state = (struct MedianState *) PG_GETARG_BYTEA_P(0);
+	if (PG_ARGISNULL(1))
+	{
+		/*
+		 * discard NULL input values - though I'm not sure it's possible to
+		 * get a NULL for the inverse transfer function.
+		 */
+	}
+	else
+	{
+		Oid			partyp;
+
+		if (NULL == state)
+		{
+			state = create_MedianState(agg_context);
+		}
+		partyp = get_fn_expr_argtype(fcinfo->flinfo, 1);
+		switch (partyp)
+		{
+			case INT2OID:
+				state = undo_median_numeral(state, PG_GETARG_INT16(1));
+				break;
+			case INT4OID:
+				state = undo_median_numeral(state, PG_GETARG_INT32(1));
+				break;
+			case INT8OID:
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+				state = undo_median_numeral(state, PG_GETARG_INT64(1));
+				break;
+			case TEXTOID:
+				state = undo_median_text(state, PG_GETARG_TEXT_P_COPY(1), PG_GET_COLLATION());
+				break;
+			default:
+				elog(ERROR, "parameter type oid=%u not supported", partyp);
+		}
+	}
+
+	if (state == NULL)
+	{
+		PG_RETURN_NULL();
+	}
+	else
+	{
+		PG_RETURN_BYTEA_P(state);
+	}
+}
+
+
 PG_FUNCTION_INFO_V1(median_finalfn);
 
 /*
  * Median final function.
  *
  * This function is called after all values in the median set has been
- * processed by the state transfer function. It should perform any necessary
- * post processing and clean up any temporary state.
+ * processed by the state transfer function(s). It should perform any
+ * necessary post processing and clean up any temporary state.
  *
  * This assumes that, by now, the data is sorted. An alternative
  * approach would be to use "Quick Select", probably improved, like
@@ -297,12 +418,12 @@ median_finalfn(PG_FUNCTION_ARGS)
 			{
 				case vcNumeral:
 					{
-						int64		rslt = state->data.i[state->dim / 2 + 1];
+						int64		rslt = state->data.i[state->dim / 2];
 
 						PG_RETURN_DATUM(Int64GetDatum(rslt));
 					}
 				case vcText:
-					PG_RETURN_TEXT_P(state->data.t[state->dim / 2 + 1]);
+					PG_RETURN_TEXT_P(state->data.t[state->dim / 2]);
 			}
 		}
 
@@ -312,10 +433,7 @@ median_finalfn(PG_FUNCTION_ARGS)
 
 /* For parallel aggregates, one would need to write a few more
    functions. A "combine", essentially implementing a "merge" of
-   sorted arrays and "serialze" and "de-serialize", whcih are trivial
-   for numbers, but require some work for strings, essentially making
-   a data structure popular in the Win32API: array of strings
-   represented by an array of characters, where one strings is put
-   after the other, separated with a NUL character and ending with an
-   empty string (two consequtive NUL characters).
+   sorted arrays and "serialze" and "de-serialize", which are trivial
+   for numbers, but require some work for strings, writing each one
+   with the length first and then the actual content.
  */
