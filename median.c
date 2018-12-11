@@ -25,11 +25,17 @@ enum ValueClass
 	vcText
 };
 
-/** This is a straight-forward implementation that scales poorly as
-    the `data` goes "beyond cache". To solve that, we should provide
-    an array of "pages", each being an array of at most 100000 or so
-    elements (that can fit into a cache of a "everyday" CPU), and
-    insert into them pages, adding new one if the last is full and
+/** We keep a sorted array, instead of a node-based approach
+    (such as an AWL or red-black-tree), because it's actually
+    faster for a lot of use cases when array can fit into CPU
+    cache (which is pretty large these days), while being much
+    easier to implement and maintain.
+
+    This is a straight-forward implementation that scales poorly as
+    the size of  `data` goes "beyond cache". To solve that, we should
+    provide an array of "pages", each being an array of at most 100000
+    or so elements (that can fit into a cache of an "everyday" CPU),
+    and insert into them pages, adding new one if the last is full and
     element needs to be inserted after it and breaking them up when
     they are full yet a new element needs to be inserted. It would
     slow down iteration a little, but would speed up insertion _much_,
